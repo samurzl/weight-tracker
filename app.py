@@ -34,6 +34,14 @@ def ensure_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
     migrate_measurements(conn)
     conn.commit()
     return conn
@@ -74,6 +82,26 @@ def fetch_measurements(conn):
     )
     rows = cur.fetchall()
     return rows
+
+
+def get_setting(conn, key, default=None):
+    cur = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    return default
+
+
+def set_setting(conn, key, value):
+    conn.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
 
 
 
@@ -142,12 +170,41 @@ def moving_average(values, window=7):
     return prefix + conv.tolist()
 
 
+def calculate_body_fat_percent(weight_kg, waist_cm, sex):
+    if weight_kg is None or waist_cm is None:
+        return np.nan
+    if isinstance(weight_kg, float) and math.isnan(weight_kg):
+        return np.nan
+    if isinstance(waist_cm, float) and math.isnan(waist_cm):
+        return np.nan
+
+    weight_lb = weight_kg * 2.2046226218
+    waist_in = waist_cm / 2.54
+    if sex == "female":
+        body_fat = ((4.15 * waist_in) - (0.082 * weight_lb) - 76.76) / weight_lb * 100
+    else:
+        body_fat = ((4.15 * waist_in) - (0.082 * weight_lb) - 98.42) / weight_lb * 100
+    return body_fat
+
+
+def calculate_body_fat_series(weight_values, waist_values, sex):
+    if not weight_values:
+        return []
+    weight_interp = interpolate_series(weight_values)
+    waist_interp = interpolate_series(waist_values)
+    return [
+        calculate_body_fat_percent(weight, waist, sex)
+        for weight, waist in zip(weight_interp, waist_interp)
+    ]
+
+
 def calculate_maintenance_range(
     dates,
     calories,
     calories_accuracy,
     weight_values,
     waist_values,
+    sex,
 ):
     if not dates:
         return [], [], [], []
@@ -186,15 +243,16 @@ def calculate_maintenance_range(
         waist_today = waist_smoothed[index]
         waist_yesterday = waist_smoothed[index - 1]
 
+        fat_today_pct = calculate_body_fat_percent(weight_today, waist_today, sex)
+        fat_yesterday_pct = calculate_body_fat_percent(weight_yesterday, waist_yesterday, sex)
         if math.isnan(weight_today) or math.isnan(weight_yesterday):
-            weight_change = 0
+            fat_change = 0
+        elif math.isnan(fat_today_pct) or math.isnan(fat_yesterday_pct):
+            fat_change = 0
         else:
-            weight_change = weight_today - weight_yesterday
-        if math.isnan(waist_today) or math.isnan(waist_yesterday):
-            waist_change = 0
-        else:
-            waist_change = waist_today - waist_yesterday
-        fat_change = (weight_change + waist_change * WAIST_TO_FAT_KG_PER_CM) / 2
+            fat_today_mass = weight_today * (fat_today_pct / 100)
+            fat_yesterday_mass = weight_yesterday * (fat_yesterday_pct / 100)
+            fat_change = fat_today_mass - fat_yesterday_mass
         deficit = -fat_change * 7700
 
         intake = calories_interp[index]
@@ -235,6 +293,7 @@ class WeightTrackerApp(tk.Tk):
         self.minsize(1000, 650)
 
         self.conn = ensure_db()
+        self.sex = get_setting(self.conn, "sex", "male")
 
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
@@ -306,12 +365,23 @@ class WeightTrackerApp(tk.Tk):
         note = ttk.Label(
             form_frame,
             text=(
-                "Body fat index is calculated as waist / weight. "
+                "Body fat % uses waist and weight (YMCA formula). "
                 "Maintenance calories are tuned using body fat changes."
             ),
             foreground="#555555",
         )
         note.grid(row=3, column=0, columnspan=5, sticky=tk.W, pady=(10, 0))
+
+        sex_frame = ttk.Frame(form_frame)
+        sex_frame.grid(row=4, column=0, columnspan=5, sticky=tk.W, pady=(6, 0))
+        ttk.Label(sex_frame, text="Sex for body fat %").pack(side=tk.LEFT)
+        self.sex_var = tk.StringVar(value=self.sex)
+        sex_combo = ttk.Combobox(
+            sex_frame, textvariable=self.sex_var, values=["male", "female"], width=8
+        )
+        sex_combo.pack(side=tk.LEFT, padx=(8, 0))
+        sex_combo.state(["readonly"])
+        sex_combo.bind("<<ComboboxSelected>>", self.on_sex_change)
 
         self.tree = ttk.Treeview(
             table_frame,
@@ -413,28 +483,18 @@ class WeightTrackerApp(tk.Tk):
         )
 
         body_dates = weight_dates if len(weight_dates) >= len(waist_dates) else waist_dates
-        if body_dates:
-            weight_interp = interpolate_series(weight_values)
-            waist_interp = interpolate_series(waist_values)
-            bodyfat = []
-            for weight, waist in zip(weight_interp, waist_interp):
-                if weight is None or waist is None:
-                    bodyfat.append(np.nan)
-                elif isinstance(weight, float) and math.isnan(weight):
-                    bodyfat.append(np.nan)
-                elif isinstance(waist, float) and math.isnan(waist):
-                    bodyfat.append(np.nan)
-                else:
-                    bodyfat.append(waist / weight)
-        else:
-            bodyfat = []
+        bodyfat = (
+            calculate_body_fat_series(weight_values, waist_values, self.sex)
+            if body_dates
+            else []
+        )
 
         self.plot_metric(
             self.bodyfat_ax,
             self.bodyfat_fig,
             body_dates,
             bodyfat,
-            "Body fat index (waist / weight)",
+            "Body fat % (YMCA)",
             color="#f97316",
         )
 
@@ -454,6 +514,7 @@ class WeightTrackerApp(tk.Tk):
             accuracy_values,
             weight_values,
             waist_values,
+            self.sex,
         )
         self.plot_maintenance_range(maintenance_dates, low, high, mid)
         self.plot_maintenance_error(maintenance_dates, error)
@@ -525,6 +586,11 @@ class WeightTrackerApp(tk.Tk):
         self.waist_var.set(values[2])
         self.calories_var.set(values[3])
         self.calories_accuracy_var.set(values[4])
+
+    def on_sex_change(self, _event):
+        self.sex = self.sex_var.get()
+        set_setting(self.conn, "sex", self.sex)
+        self.refresh_charts()
 
     def set_today(self):
         self.date_var.set(format_date(dt.date.today()))

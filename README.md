@@ -2,7 +2,8 @@
 
 A simple offline macOS-friendly tracker for weight, waist, and calorie measurements with
 trend charts, moving averages, and maintenance calorie estimates tuned by body fat changes,
-including a visualization of prediction error.
+including a visualization of prediction error. Body fat percentage is estimated with the
+YMCA waist/weight formula and uses the selected sex setting.
 
 ## Setup
 
