@@ -160,6 +160,51 @@ def interpolate_series(values):
     return interpolated.tolist()
 
 
+def fill_calories_series(values, window=7):
+    if not values:
+        return []
+
+    def is_missing(value):
+        return value is None or (isinstance(value, float) and math.isnan(value))
+
+    filled = []
+    total = len(values)
+    for index, value in enumerate(values):
+        if not is_missing(value):
+            filled.append(float(value))
+            continue
+
+        backward = []
+        for prev_index in range(index - 1, -1, -1):
+            candidate = values[prev_index]
+            if is_missing(candidate):
+                break
+            backward.append(float(candidate))
+            if len(backward) == window:
+                break
+
+        forward = []
+        for next_index in range(index + 1, total):
+            candidate = values[next_index]
+            if is_missing(candidate):
+                break
+            forward.append(float(candidate))
+            if len(forward) == window:
+                break
+
+        if len(backward) >= window:
+            filled.append(float(np.mean(backward[:window])))
+        elif len(forward) >= window:
+            filled.append(float(np.mean(forward[:window])))
+        elif backward or forward:
+            chosen = backward if len(backward) >= len(forward) else forward
+            filled.append(float(np.mean(chosen)))
+        else:
+            filled.append(np.nan)
+
+    return filled
+
+
 def moving_average(values, window=7):
     if len(values) < window:
         return [np.nan for _ in values]
@@ -219,7 +264,7 @@ def calculate_maintenance_range(
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
     fat_mass = calculate_body_fat_mass_series(weight_interp, waist_interp, sex)
-    calories_interp = interpolate_series(calories)
+    calories_interp = fill_calories_series(calories)
     accuracy_interp = interpolate_series(calories_accuracy)
 
     maintenance_low = []
@@ -241,14 +286,15 @@ def calculate_maintenance_range(
         return float(np.sum(window_values))
 
     for index in range(total_days):
-        if index < window:
+        lookback = min(window, index)
+        if lookback < 1:
             maintenance_low.append(baseline)
             maintenance_high.append(baseline)
             maintenance_mid.append(baseline)
             maintenance_error.append(np.nan)
             continue
 
-        prior_start = index - window
+        prior_start = index - lookback
         prior_end = index
         prior_calories_sum = window_sum(calories_interp, prior_start, prior_end)
         prior_accuracy = [
@@ -266,21 +312,21 @@ def calculate_maintenance_range(
         )
 
         fat_today = fat_mass[index - 1]
-        fat_week_ago = fat_mass[index - window]
-        if math.isnan(prior_calories_sum) or math.isnan(fat_today) or math.isnan(fat_week_ago):
+        fat_then = fat_mass[index - lookback]
+        if math.isnan(prior_calories_sum) or math.isnan(fat_today) or math.isnan(fat_then):
             estimate_mid = baseline
             estimate_low = baseline
             estimate_high = baseline
         else:
-            fat_change = fat_today - fat_week_ago
-            estimate_mid = (prior_calories_sum - fat_change * fat_kcal_per_kg) / window
+            fat_change = fat_today - fat_then
+            estimate_mid = (prior_calories_sum - fat_change * fat_kcal_per_kg) / lookback
             estimate_low = (
-                (prior_low_sum - fat_change * fat_kcal_per_kg) / window
+                (prior_low_sum - fat_change * fat_kcal_per_kg) / lookback
                 if not math.isnan(prior_low_sum)
                 else estimate_mid
             )
             estimate_high = (
-                (prior_high_sum - fat_change * fat_kcal_per_kg) / window
+                (prior_high_sum - fat_change * fat_kcal_per_kg) / lookback
                 if not math.isnan(prior_high_sum)
                 else estimate_mid
             )
@@ -289,26 +335,29 @@ def calculate_maintenance_range(
         maintenance_high.append(estimate_high)
         maintenance_mid.append(estimate_mid)
 
-        if index + window - 1 >= total_days:
+        forward_len = min(window, total_days - index)
+        if forward_len < 1 or index + forward_len - 1 >= total_days:
             maintenance_error.append(np.nan)
             continue
 
-        next_calories_sum = window_sum(calories_interp, index, index + window)
+        next_calories_sum = window_sum(calories_interp, index, index + forward_len)
         if (
             math.isnan(next_calories_sum)
             or math.isnan(estimate_mid)
             or math.isnan(fat_today)
-            or math.isnan(fat_mass[index + window - 1])
+            or math.isnan(fat_mass[index + forward_len - 1])
         ):
             maintenance_error.append(np.nan)
             continue
 
-        predicted_change = (next_calories_sum - estimate_mid * window) / fat_kcal_per_kg
-        actual_change = fat_mass[index + window - 1] - fat_today
+        predicted_change = (
+            next_calories_sum - estimate_mid * forward_len
+        ) / fat_kcal_per_kg
+        actual_change = fat_mass[index + forward_len - 1] - fat_today
         error_kg = actual_change - predicted_change
         maintenance_error.append(error_kg * fat_kcal_per_kg)
 
-        deficit = estimate_mid * window - next_calories_sum
+        deficit = estimate_mid * forward_len - next_calories_sum
         if actual_change != 0 and not math.isnan(deficit):
             implied_kcal = deficit / (-actual_change)
             if implied_kcal > 0 and math.isfinite(implied_kcal):
@@ -537,6 +586,7 @@ class WeightTrackerApp(tk.Tk):
             calories_values,
             "Calories",
             color="#9333ea",
+            fill_strategy=fill_calories_series,
         )
 
         maintenance_dates = weight_dates if weight_dates else calories_dates
@@ -551,7 +601,7 @@ class WeightTrackerApp(tk.Tk):
         self.plot_maintenance_range(maintenance_dates, low, high, mid)
         self.plot_maintenance_error(maintenance_dates, error)
 
-    def plot_metric(self, ax, fig, dates, values, label, color):
+    def plot_metric(self, ax, fig, dates, values, label, color, fill_strategy=interpolate_series):
         ax.clear()
         ax.grid(True, linestyle="--", alpha=0.3)
         if not dates:
@@ -559,7 +609,7 @@ class WeightTrackerApp(tk.Tk):
             fig.canvas.draw()
             return
 
-        interpolated = interpolate_series(values)
+        interpolated = fill_strategy(values)
         average = moving_average(interpolated)
 
         x_vals = [dt.datetime.combine(d, dt.time()) for d in dates]
