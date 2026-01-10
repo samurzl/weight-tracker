@@ -249,6 +249,8 @@ def calculate_maintenance_range(
 
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
+    weight_smoothed = moving_average(weight_interp)
+    waist_smoothed = moving_average(waist_interp)
     calories_interp = interpolate_series(calories)
     accuracy_interp = interpolate_series(calories_accuracy)
 
@@ -265,6 +267,9 @@ def calculate_maintenance_range(
     weight_for_baseline = latest_weight if latest_weight else baseline_weight
     baseline = calculate_baseline_maintenance(profile, weight_for_baseline)
 
+    correction = 0.0
+    learning_rate = 0.2
+
     for index in range(total_days):
         if index == 0:
             maintenance_low.append(baseline)
@@ -272,29 +277,38 @@ def calculate_maintenance_range(
             maintenance_mid.append(baseline)
             continue
 
-        if math.isnan(weight_interp[index]) or math.isnan(weight_interp[index - 1]):
+        weight_today = weight_smoothed[index]
+        weight_yesterday = weight_smoothed[index - 1]
+        waist_today = waist_smoothed[index]
+        waist_yesterday = waist_smoothed[index - 1]
+
+        if math.isnan(weight_today) or math.isnan(weight_yesterday):
             weight_change = 0
         else:
-            weight_change = weight_interp[index] - weight_interp[index - 1]
-        if math.isnan(waist_interp[index]) or math.isnan(waist_interp[index - 1]):
+            weight_change = weight_today - weight_yesterday
+        if math.isnan(waist_today) or math.isnan(waist_yesterday):
             waist_change = 0
         else:
-            waist_change = waist_interp[index] - waist_interp[index - 1]
+            waist_change = waist_today - waist_yesterday
         fat_change = (weight_change + waist_change * WAIST_TO_FAT_KG_PER_CM) / 2
         deficit = -fat_change * 7700
 
         intake = calories_interp[index]
         accuracy = accuracy_interp[index]
         if math.isnan(intake) or math.isnan(accuracy):
-            estimate_low = baseline
-            estimate_high = baseline
-            estimate_mid = baseline
+            estimate_low = baseline + correction
+            estimate_high = baseline + correction
+            estimate_mid = baseline + correction
         else:
             intake_low = intake - accuracy
             intake_high = intake + accuracy
-            estimate_low = intake_low + deficit
-            estimate_high = intake_high + deficit
+            estimate_low = intake_low + deficit + correction
+            estimate_high = intake_high + deficit + correction
             estimate_mid = (estimate_low + estimate_high) / 2
+
+            predicted_change = (intake - estimate_mid) / 7700
+            error_kg = weight_change - predicted_change
+            correction += error_kg * 7700 * learning_rate
 
         blended_low = baseline * (1 - coverage) + estimate_low * coverage
         blended_high = baseline * (1 - coverage) + estimate_high * coverage
