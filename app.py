@@ -218,8 +218,7 @@ def calculate_maintenance_range(
 
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
-    weight_smoothed = moving_average(weight_interp)
-    waist_smoothed = moving_average(waist_interp)
+    fat_mass = calculate_body_fat_mass_series(weight_interp, waist_interp, sex)
     calories_interp = interpolate_series(calories)
     accuracy_interp = interpolate_series(calories_accuracy)
 
@@ -229,64 +228,91 @@ def calculate_maintenance_range(
     maintenance_error = []
 
     total_days = len(dates)
-    tracked_days = len([v for v in calories if v is not None])
-    coverage = tracked_days / total_days if total_days else 0
-
     baseline = float(np.nanmean(calories_interp)) if calories_interp else 2000.0
 
-    correction = 0.0
-    learning_rate = 0.2
+    fat_kcal_per_kg = 7700.0
+    learning_rate = 0.15
+    window = 7
+
+    def window_sum(values, start_index, end_index):
+        window_values = values[start_index:end_index]
+        if any(math.isnan(v) for v in window_values):
+            return np.nan
+        return float(np.sum(window_values))
 
     for index in range(total_days):
-        if index == 0:
-            maintenance_low.append(baseline + correction)
-            maintenance_high.append(baseline + correction)
-            maintenance_mid.append(baseline + correction)
+        if index < window:
+            maintenance_low.append(baseline)
+            maintenance_high.append(baseline)
+            maintenance_mid.append(baseline)
             maintenance_error.append(np.nan)
             continue
 
-        weight_today = weight_smoothed[index]
-        weight_yesterday = weight_smoothed[index - 1]
-        waist_today = waist_smoothed[index]
-        waist_yesterday = waist_smoothed[index - 1]
+        prior_start = index - window
+        prior_end = index
+        prior_calories_sum = window_sum(calories_interp, prior_start, prior_end)
+        prior_accuracy = [
+            0.0 if math.isnan(v) else v for v in accuracy_interp[prior_start:prior_end]
+        ]
+        prior_low_sum = (
+            prior_calories_sum - float(np.sum(prior_accuracy))
+            if not math.isnan(prior_calories_sum)
+            else np.nan
+        )
+        prior_high_sum = (
+            prior_calories_sum + float(np.sum(prior_accuracy))
+            if not math.isnan(prior_calories_sum)
+            else np.nan
+        )
 
-        fat_today_mass = calculate_body_fat_mass(weight_today, waist_today, sex)
-        fat_yesterday_mass = calculate_body_fat_mass(weight_yesterday, waist_yesterday, sex)
-        if math.isnan(weight_today) or math.isnan(weight_yesterday):
-            fat_change = 0
-        elif math.isnan(fat_today_mass) or math.isnan(fat_yesterday_mass):
-            fat_change = 0
+        fat_today = fat_mass[index - 1]
+        fat_week_ago = fat_mass[index - window]
+        if math.isnan(prior_calories_sum) or math.isnan(fat_today) or math.isnan(fat_week_ago):
+            estimate_mid = baseline
+            estimate_low = baseline
+            estimate_high = baseline
         else:
-            fat_change = fat_today_mass - fat_yesterday_mass
-        deficit = -fat_change * 7700
+            fat_change = fat_today - fat_week_ago
+            estimate_mid = (prior_calories_sum - fat_change * fat_kcal_per_kg) / window
+            estimate_low = (
+                (prior_low_sum - fat_change * fat_kcal_per_kg) / window
+                if not math.isnan(prior_low_sum)
+                else estimate_mid
+            )
+            estimate_high = (
+                (prior_high_sum - fat_change * fat_kcal_per_kg) / window
+                if not math.isnan(prior_high_sum)
+                else estimate_mid
+            )
 
-        intake = calories_interp[index]
-        accuracy = accuracy_interp[index]
-        baseline_estimate = baseline + correction
-        if math.isnan(intake) or math.isnan(accuracy):
-            estimate_low = baseline_estimate
-            estimate_high = baseline_estimate
-            estimate_mid = baseline_estimate
-            error_kg = np.nan
-        else:
-            intake_low = intake - accuracy
-            intake_high = intake + accuracy
-            estimate_low = intake_low - (fat_change * 7700)
-            estimate_high = intake_high - (fat_change * 7700)
-            estimate_mid = intake - (fat_change * 7700)
+        maintenance_low.append(estimate_low)
+        maintenance_high.append(estimate_high)
+        maintenance_mid.append(estimate_mid)
 
-            predicted_change = (intake - baseline_estimate) / 7700
-            error_kg = fat_change - predicted_change
-            correction += error_kg * 7700 * learning_rate
+        if index + window - 1 >= total_days:
+            maintenance_error.append(np.nan)
+            continue
 
-        blended_low = baseline_estimate * (1 - coverage) + estimate_low * coverage
-        blended_high = baseline_estimate * (1 - coverage) + estimate_high * coverage
-        blended_mid = baseline_estimate * (1 - coverage) + estimate_mid * coverage
+        next_calories_sum = window_sum(calories_interp, index, index + window)
+        if (
+            math.isnan(next_calories_sum)
+            or math.isnan(estimate_mid)
+            or math.isnan(fat_today)
+            or math.isnan(fat_mass[index + window - 1])
+        ):
+            maintenance_error.append(np.nan)
+            continue
 
-        maintenance_low.append(blended_low)
-        maintenance_high.append(blended_high)
-        maintenance_mid.append(blended_mid)
-        maintenance_error.append(error_kg * 7700 if not math.isnan(error_kg) else np.nan)
+        predicted_change = (next_calories_sum - estimate_mid * window) / fat_kcal_per_kg
+        actual_change = fat_mass[index + window - 1] - fat_today
+        error_kg = actual_change - predicted_change
+        maintenance_error.append(error_kg * fat_kcal_per_kg)
+
+        deficit = estimate_mid * window - next_calories_sum
+        if actual_change != 0 and not math.isnan(deficit):
+            implied_kcal = deficit / (-actual_change)
+            if implied_kcal > 0 and math.isfinite(implied_kcal):
+                fat_kcal_per_kg += (implied_kcal - fat_kcal_per_kg) * learning_rate
 
     return maintenance_low, maintenance_high, maintenance_mid, maintenance_error
 
