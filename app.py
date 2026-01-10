@@ -262,25 +262,26 @@ def calculate_maintenance_range(
 
         intake = calories_interp[index]
         accuracy = accuracy_interp[index]
+        baseline_estimate = baseline + correction
         if math.isnan(intake) or math.isnan(accuracy):
-            estimate_low = baseline + correction
-            estimate_high = baseline + correction
-            estimate_mid = baseline + correction
+            estimate_low = baseline_estimate
+            estimate_high = baseline_estimate
+            estimate_mid = baseline_estimate
             error_kg = np.nan
         else:
             intake_low = intake - accuracy
             intake_high = intake + accuracy
-            estimate_low = intake_low + deficit + correction
-            estimate_high = intake_high + deficit + correction
-            estimate_mid = (estimate_low + estimate_high) / 2
+            estimate_low = intake_low - (fat_change * 7700)
+            estimate_high = intake_high - (fat_change * 7700)
+            estimate_mid = intake - (fat_change * 7700)
 
-            predicted_change = (intake - estimate_mid) / 7700
+            predicted_change = (intake - baseline_estimate) / 7700
             error_kg = fat_change - predicted_change
             correction += error_kg * 7700 * learning_rate
 
-        blended_low = baseline * (1 - coverage) + estimate_low * coverage
-        blended_high = baseline * (1 - coverage) + estimate_high * coverage
-        blended_mid = baseline * (1 - coverage) + estimate_mid * coverage
+        blended_low = baseline_estimate * (1 - coverage) + estimate_low * coverage
+        blended_high = baseline_estimate * (1 - coverage) + estimate_high * coverage
+        blended_mid = baseline_estimate * (1 - coverage) + estimate_mid * coverage
 
         maintenance_low.append(blended_low)
         maintenance_high.append(blended_high)
