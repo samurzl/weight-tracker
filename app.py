@@ -240,8 +240,13 @@ def calculate_body_fat_mass(weight_kg, waist_cm, sex):
 
 
 def calculate_body_fat_mass_series(weight_values, waist_values, sex):
-    if not weight_values:
+    target_len = max(len(weight_values), len(waist_values))
+    if target_len == 0:
         return []
+    if len(weight_values) < target_len:
+        weight_values = list(weight_values) + [np.nan] * (target_len - len(weight_values))
+    if len(waist_values) < target_len:
+        waist_values = list(waist_values) + [np.nan] * (target_len - len(waist_values))
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
     return [
@@ -628,6 +633,13 @@ class WeightTrackerApp(tk.Tk):
             return
 
         interpolated = fill_strategy(values)
+        if len(interpolated) != len(dates):
+            if not interpolated:
+                interpolated = [np.nan] * len(dates)
+            elif len(interpolated) < len(dates):
+                interpolated = interpolated + [np.nan] * (len(dates) - len(interpolated))
+            else:
+                interpolated = interpolated[: len(dates)]
         average = moving_average(interpolated)
 
         x_vals = [dt.datetime.combine(d, dt.time()) for d in dates]
