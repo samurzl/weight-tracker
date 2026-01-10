@@ -160,6 +160,51 @@ def interpolate_series(values):
     return interpolated.tolist()
 
 
+def fill_calories_series(values, window=7):
+    if not values:
+        return []
+
+    def is_missing(value):
+        return value is None or (isinstance(value, float) and math.isnan(value))
+
+    filled = []
+    total = len(values)
+    for index, value in enumerate(values):
+        if not is_missing(value):
+            filled.append(float(value))
+            continue
+
+        backward = []
+        for prev_index in range(index - 1, -1, -1):
+            candidate = values[prev_index]
+            if is_missing(candidate):
+                break
+            backward.append(float(candidate))
+            if len(backward) == window:
+                break
+
+        forward = []
+        for next_index in range(index + 1, total):
+            candidate = values[next_index]
+            if is_missing(candidate):
+                break
+            forward.append(float(candidate))
+            if len(forward) == window:
+                break
+
+        if len(backward) >= window:
+            filled.append(float(np.mean(backward[:window])))
+        elif len(forward) >= window:
+            filled.append(float(np.mean(forward[:window])))
+        elif backward or forward:
+            chosen = backward if len(backward) >= len(forward) else forward
+            filled.append(float(np.mean(chosen)))
+        else:
+            filled.append(np.nan)
+
+    return filled
+
+
 def moving_average(values, window=7):
     if len(values) < window:
         return [np.nan for _ in values]
@@ -219,7 +264,7 @@ def calculate_maintenance_range(
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
     fat_mass = calculate_body_fat_mass_series(weight_interp, waist_interp, sex)
-    calories_interp = interpolate_series(calories)
+    calories_interp = fill_calories_series(calories)
     accuracy_interp = interpolate_series(calories_accuracy)
 
     maintenance_low = []
@@ -537,6 +582,7 @@ class WeightTrackerApp(tk.Tk):
             calories_values,
             "Calories",
             color="#9333ea",
+            fill_strategy=fill_calories_series,
         )
 
         maintenance_dates = weight_dates if weight_dates else calories_dates
@@ -551,7 +597,7 @@ class WeightTrackerApp(tk.Tk):
         self.plot_maintenance_range(maintenance_dates, low, high, mid)
         self.plot_maintenance_error(maintenance_dates, error)
 
-    def plot_metric(self, ax, fig, dates, values, label, color):
+    def plot_metric(self, ax, fig, dates, values, label, color, fill_strategy=interpolate_series):
         ax.clear()
         ax.grid(True, linestyle="--", alpha=0.3)
         if not dates:
@@ -559,7 +605,7 @@ class WeightTrackerApp(tk.Tk):
             fig.canvas.draw()
             return
 
-        interpolated = interpolate_series(values)
+        interpolated = fill_strategy(values)
         average = moving_average(interpolated)
 
         x_vals = [dt.datetime.combine(d, dt.time()) for d in dates]
