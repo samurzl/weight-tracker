@@ -1,6 +1,7 @@
 # Weight Tracker
 
-A simple offline macOS-friendly tracker for weight and waist measurements with trend charts.
+A simple offline macOS-friendly tracker for weight, waist, and calorie measurements with
+trend charts, moving averages, and maintenance calorie estimates.
 
 ## Setup
 
