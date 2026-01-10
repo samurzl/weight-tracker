@@ -187,13 +187,20 @@ def calculate_body_fat_percent(weight_kg, waist_cm, sex):
     return body_fat
 
 
-def calculate_body_fat_series(weight_values, waist_values, sex):
+def calculate_body_fat_mass(weight_kg, waist_cm, sex):
+    body_fat_percent = calculate_body_fat_percent(weight_kg, waist_cm, sex)
+    if math.isnan(body_fat_percent):
+        return np.nan
+    return weight_kg * (body_fat_percent / 100)
+
+
+def calculate_body_fat_mass_series(weight_values, waist_values, sex):
     if not weight_values:
         return []
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
     return [
-        calculate_body_fat_percent(weight, waist, sex)
+        calculate_body_fat_mass(weight, waist, sex)
         for weight, waist in zip(weight_interp, waist_interp)
     ]
 
@@ -243,15 +250,13 @@ def calculate_maintenance_range(
         waist_today = waist_smoothed[index]
         waist_yesterday = waist_smoothed[index - 1]
 
-        fat_today_pct = calculate_body_fat_percent(weight_today, waist_today, sex)
-        fat_yesterday_pct = calculate_body_fat_percent(weight_yesterday, waist_yesterday, sex)
+        fat_today_mass = calculate_body_fat_mass(weight_today, waist_today, sex)
+        fat_yesterday_mass = calculate_body_fat_mass(weight_yesterday, waist_yesterday, sex)
         if math.isnan(weight_today) or math.isnan(weight_yesterday):
             fat_change = 0
-        elif math.isnan(fat_today_pct) or math.isnan(fat_yesterday_pct):
+        elif math.isnan(fat_today_mass) or math.isnan(fat_yesterday_mass):
             fat_change = 0
         else:
-            fat_today_mass = weight_today * (fat_today_pct / 100)
-            fat_yesterday_mass = weight_yesterday * (fat_yesterday_pct / 100)
             fat_change = fat_today_mass - fat_yesterday_mass
         deficit = -fat_change * 7700
 
@@ -365,7 +370,7 @@ class WeightTrackerApp(tk.Tk):
         note = ttk.Label(
             form_frame,
             text=(
-                "Body fat % uses waist and weight (YMCA formula). "
+                "Body fat mass uses waist and weight (YMCA formula). "
                 "Maintenance calories are tuned using body fat changes."
             ),
             foreground="#555555",
@@ -374,7 +379,7 @@ class WeightTrackerApp(tk.Tk):
 
         sex_frame = ttk.Frame(form_frame)
         sex_frame.grid(row=4, column=0, columnspan=5, sticky=tk.W, pady=(6, 0))
-        ttk.Label(sex_frame, text="Sex for body fat %").pack(side=tk.LEFT)
+        ttk.Label(sex_frame, text="Sex for body fat mass").pack(side=tk.LEFT)
         self.sex_var = tk.StringVar(value=self.sex)
         sex_combo = ttk.Combobox(
             sex_frame, textvariable=self.sex_var, values=["male", "female"], width=8
@@ -484,7 +489,7 @@ class WeightTrackerApp(tk.Tk):
 
         body_dates = weight_dates if len(weight_dates) >= len(waist_dates) else waist_dates
         bodyfat = (
-            calculate_body_fat_series(weight_values, waist_values, self.sex)
+            calculate_body_fat_mass_series(weight_values, waist_values, self.sex)
             if body_dates
             else []
         )
@@ -494,7 +499,7 @@ class WeightTrackerApp(tk.Tk):
             self.bodyfat_fig,
             body_dates,
             bodyfat,
-            "Body fat % (YMCA)",
+            "Body fat mass (kg)",
             color="#f97316",
         )
 
