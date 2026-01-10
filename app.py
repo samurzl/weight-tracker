@@ -287,15 +287,15 @@ def calculate_maintenance_range(
         return float(np.sum(window_values))
 
     for index in range(total_days):
-        fat_kcal_series.append(fat_kcal_per_kg)
-        if index < window:
+        lookback = min(window, index)
+        if lookback < 1:
             maintenance_low.append(baseline)
             maintenance_high.append(baseline)
             maintenance_mid.append(baseline)
             maintenance_error.append(np.nan)
             continue
 
-        prior_start = index - window
+        prior_start = index - lookback
         prior_end = index
         prior_calories_sum = window_sum(calories_interp, prior_start, prior_end)
         prior_accuracy = [
@@ -313,21 +313,21 @@ def calculate_maintenance_range(
         )
 
         fat_today = fat_mass[index - 1]
-        fat_week_ago = fat_mass[index - window]
-        if math.isnan(prior_calories_sum) or math.isnan(fat_today) or math.isnan(fat_week_ago):
+        fat_then = fat_mass[index - lookback]
+        if math.isnan(prior_calories_sum) or math.isnan(fat_today) or math.isnan(fat_then):
             estimate_mid = baseline
             estimate_low = baseline
             estimate_high = baseline
         else:
-            fat_change = fat_today - fat_week_ago
-            estimate_mid = (prior_calories_sum - fat_change * fat_kcal_per_kg) / window
+            fat_change = fat_today - fat_then
+            estimate_mid = (prior_calories_sum - fat_change * fat_kcal_per_kg) / lookback
             estimate_low = (
-                (prior_low_sum - fat_change * fat_kcal_per_kg) / window
+                (prior_low_sum - fat_change * fat_kcal_per_kg) / lookback
                 if not math.isnan(prior_low_sum)
                 else estimate_mid
             )
             estimate_high = (
-                (prior_high_sum - fat_change * fat_kcal_per_kg) / window
+                (prior_high_sum - fat_change * fat_kcal_per_kg) / lookback
                 if not math.isnan(prior_high_sum)
                 else estimate_mid
             )
@@ -336,26 +336,29 @@ def calculate_maintenance_range(
         maintenance_high.append(estimate_high)
         maintenance_mid.append(estimate_mid)
 
-        if index + window - 1 >= total_days:
+        forward_len = min(window, total_days - index)
+        if forward_len < 1 or index + forward_len - 1 >= total_days:
             maintenance_error.append(np.nan)
             continue
 
-        next_calories_sum = window_sum(calories_interp, index, index + window)
+        next_calories_sum = window_sum(calories_interp, index, index + forward_len)
         if (
             math.isnan(next_calories_sum)
             or math.isnan(estimate_mid)
             or math.isnan(fat_today)
-            or math.isnan(fat_mass[index + window - 1])
+            or math.isnan(fat_mass[index + forward_len - 1])
         ):
             maintenance_error.append(np.nan)
             continue
 
-        predicted_change = (next_calories_sum - estimate_mid * window) / fat_kcal_per_kg
-        actual_change = fat_mass[index + window - 1] - fat_today
+        predicted_change = (
+            next_calories_sum - estimate_mid * forward_len
+        ) / fat_kcal_per_kg
+        actual_change = fat_mass[index + forward_len - 1] - fat_today
         error_kg = actual_change - predicted_change
         maintenance_error.append(error_kg * fat_kcal_per_kg)
 
-        deficit = estimate_mid * window - next_calories_sum
+        deficit = estimate_mid * forward_len - next_calories_sum
         if actual_change != 0 and not math.isnan(deficit):
             implied_kcal = deficit / (-actual_change)
             if implied_kcal > 0 and math.isfinite(implied_kcal):
