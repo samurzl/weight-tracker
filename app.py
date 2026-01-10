@@ -47,6 +47,11 @@ def upsert_measurement(conn, date_str, weight, waist):
     conn.commit()
 
 
+def delete_measurement(conn, date_str):
+    conn.execute("DELETE FROM measurements WHERE date = ?", (date_str,))
+    conn.commit()
+
+
 def fetch_measurements(conn):
     cur = conn.execute("SELECT date, weight, waist FROM measurements ORDER BY date")
     rows = cur.fetchall()
@@ -175,6 +180,9 @@ class WeightTrackerApp(tk.Tk):
 
         today_button = ttk.Button(button_frame, text="Today", command=self.set_today)
         today_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        delete_button = ttk.Button(button_frame, text="Delete day", command=self.delete_entry)
+        delete_button.pack(side=tk.LEFT, padx=(8, 0))
 
         note = ttk.Label(
             form_frame,
@@ -344,7 +352,22 @@ class WeightTrackerApp(tk.Tk):
         upsert_measurement(self.conn, date_str, weight, waist)
         self.refresh_table()
         self.refresh_charts()
-        messagebox.showinfo("Saved", "Entry saved.")
+
+    def delete_entry(self):
+        date_str = self.date_var.get().strip()
+        if not date_str:
+            messagebox.showerror("Missing date", "Please enter a date.")
+            return
+        try:
+            parse_date(date_str)
+        except ValueError:
+            messagebox.showerror("Invalid date", "Use format YYYY-MM-DD.")
+            return
+
+        delete_measurement(self.conn, date_str)
+        self.refresh_table()
+        self.refresh_charts()
+        self.clear_form()
 
     def parse_float(self, value, label):
         if not value:
