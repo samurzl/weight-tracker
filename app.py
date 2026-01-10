@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 APP_DIR = os.path.join(os.path.expanduser("~"), ".weight_tracker")
 DB_PATH = os.path.join(APP_DIR, "measurements.sqlite")
 DATE_FORMAT = "%Y-%m-%d"
-MAINTENANCE_BASELINE_DEFAULT = 2200.0
 WAIST_TO_FAT_KG_PER_CM = 0.25
 
 
@@ -32,19 +31,6 @@ def ensure_db():
             waist REAL,
             calories REAL,
             calories_accuracy REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS profile (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            height_cm REAL,
-            age_years INTEGER,
-            sex TEXT,
-            activity_level TEXT,
-            baseline_weight REAL,
-            baseline_maintenance REAL
         )
         """
     )
@@ -90,59 +76,6 @@ def fetch_measurements(conn):
     return rows
 
 
-def fetch_profile(conn):
-    cur = conn.execute(
-        """
-        SELECT height_cm, age_years, sex, activity_level, baseline_weight, baseline_maintenance
-        FROM profile
-        WHERE id = 1
-        """
-    )
-    row = cur.fetchone()
-    if row:
-        return {
-            "height_cm": row[0],
-            "age_years": row[1],
-            "sex": row[2],
-            "activity_level": row[3],
-            "baseline_weight": row[4],
-            "baseline_maintenance": row[5],
-        }
-    return {
-        "height_cm": None,
-        "age_years": None,
-        "sex": "male",
-        "activity_level": "moderate",
-        "baseline_weight": None,
-        "baseline_maintenance": MAINTENANCE_BASELINE_DEFAULT,
-    }
-
-
-def save_profile(conn, profile):
-    conn.execute(
-        """
-        INSERT INTO profile (
-            id, height_cm, age_years, sex, activity_level, baseline_weight, baseline_maintenance
-        )
-        VALUES (1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            height_cm = excluded.height_cm,
-            age_years = excluded.age_years,
-            sex = excluded.sex,
-            activity_level = excluded.activity_level,
-            baseline_weight = excluded.baseline_weight,
-            baseline_maintenance = excluded.baseline_maintenance
-        """,
-        (
-            profile["height_cm"],
-            profile["age_years"],
-            profile["sex"],
-            profile["activity_level"],
-            profile["baseline_weight"],
-            profile["baseline_maintenance"],
-        ),
-    )
-    conn.commit()
 
 
 def parse_date(date_str):
@@ -209,43 +142,15 @@ def moving_average(values, window=7):
     return prefix + conv.tolist()
 
 
-def activity_multiplier(level):
-    multipliers = {
-        "sedentary": 1.2,
-        "light": 1.375,
-        "moderate": 1.55,
-        "active": 1.725,
-        "very active": 1.9,
-    }
-    return multipliers.get(level, 1.55)
-
-
-def calculate_baseline_maintenance(profile, weight_kg):
-    height_cm = profile.get("height_cm")
-    age_years = profile.get("age_years")
-    sex = profile.get("sex", "male")
-    if height_cm and age_years and weight_kg:
-        if sex == "female":
-            bmr = 10 * weight_kg + 6.25 * height_cm - 5 * age_years - 161
-        else:
-            bmr = 10 * weight_kg + 6.25 * height_cm - 5 * age_years + 5
-        return bmr * activity_multiplier(profile.get("activity_level", "moderate"))
-    baseline = profile.get("baseline_maintenance")
-    if baseline:
-        return baseline
-    return MAINTENANCE_BASELINE_DEFAULT
-
-
 def calculate_maintenance_range(
     dates,
     calories,
     calories_accuracy,
     weight_values,
     waist_values,
-    profile,
 ):
     if not dates:
-        return [], [], []
+        return [], [], [], []
 
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
@@ -257,24 +162,23 @@ def calculate_maintenance_range(
     maintenance_low = []
     maintenance_high = []
     maintenance_mid = []
+    maintenance_error = []
 
     total_days = len(dates)
     tracked_days = len([v for v in calories if v is not None])
     coverage = tracked_days / total_days if total_days else 0
 
-    baseline_weight = profile.get("baseline_weight")
-    latest_weight = next((v for v in reversed(weight_interp) if not math.isnan(v)), None)
-    weight_for_baseline = latest_weight if latest_weight else baseline_weight
-    baseline = calculate_baseline_maintenance(profile, weight_for_baseline)
+    baseline = float(np.nanmean(calories_interp)) if calories_interp else 2000.0
 
     correction = 0.0
     learning_rate = 0.2
 
     for index in range(total_days):
         if index == 0:
-            maintenance_low.append(baseline)
-            maintenance_high.append(baseline)
-            maintenance_mid.append(baseline)
+            maintenance_low.append(baseline + correction)
+            maintenance_high.append(baseline + correction)
+            maintenance_mid.append(baseline + correction)
+            maintenance_error.append(np.nan)
             continue
 
         weight_today = weight_smoothed[index]
@@ -299,6 +203,7 @@ def calculate_maintenance_range(
             estimate_low = baseline + correction
             estimate_high = baseline + correction
             estimate_mid = baseline + correction
+            error_kg = np.nan
         else:
             intake_low = intake - accuracy
             intake_high = intake + accuracy
@@ -307,7 +212,7 @@ def calculate_maintenance_range(
             estimate_mid = (estimate_low + estimate_high) / 2
 
             predicted_change = (intake - estimate_mid) / 7700
-            error_kg = weight_change - predicted_change
+            error_kg = fat_change - predicted_change
             correction += error_kg * 7700 * learning_rate
 
         blended_low = baseline * (1 - coverage) + estimate_low * coverage
@@ -317,8 +222,9 @@ def calculate_maintenance_range(
         maintenance_low.append(blended_low)
         maintenance_high.append(blended_high)
         maintenance_mid.append(blended_mid)
+        maintenance_error.append(error_kg * 7700 if not math.isnan(error_kg) else np.nan)
 
-    return maintenance_low, maintenance_high, maintenance_mid
+    return maintenance_low, maintenance_high, maintenance_mid, maintenance_error
 
 
 class WeightTrackerApp(tk.Tk):
@@ -329,7 +235,6 @@ class WeightTrackerApp(tk.Tk):
         self.minsize(1000, 650)
 
         self.conn = ensure_db()
-        self.profile = fetch_profile(self.conn)
 
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
@@ -402,68 +307,11 @@ class WeightTrackerApp(tk.Tk):
             form_frame,
             text=(
                 "Body fat index is calculated as waist / weight. "
-                "Maintenance calories use weight + waist changes."
+                "Maintenance calories are tuned using body fat changes."
             ),
             foreground="#555555",
         )
         note.grid(row=3, column=0, columnspan=5, sticky=tk.W, pady=(10, 0))
-
-        profile_frame = ttk.LabelFrame(root_frame, text="Baseline profile", padding=12)
-        profile_frame.pack(fill=tk.X, pady=(0, 12))
-
-        ttk.Label(profile_frame, text="Height (cm)").grid(row=0, column=0, sticky=tk.W)
-        self.height_var = tk.StringVar(value=self.profile.get("height_cm") or "")
-        ttk.Entry(profile_frame, textvariable=self.height_var, width=10).grid(
-            row=1, column=0, sticky=tk.W, pady=(0, 8)
-        )
-
-        ttk.Label(profile_frame, text="Age").grid(row=0, column=1, sticky=tk.W)
-        self.age_var = tk.StringVar(value=self.profile.get("age_years") or "")
-        ttk.Entry(profile_frame, textvariable=self.age_var, width=10).grid(
-            row=1, column=1, sticky=tk.W, padx=(12, 0), pady=(0, 8)
-        )
-
-        ttk.Label(profile_frame, text="Sex").grid(row=0, column=2, sticky=tk.W)
-        self.sex_var = tk.StringVar(value=self.profile.get("sex") or "male")
-        sex_combo = ttk.Combobox(
-            profile_frame, textvariable=self.sex_var, values=["male", "female"], width=10
-        )
-        sex_combo.grid(row=1, column=2, sticky=tk.W, padx=(12, 0), pady=(0, 8))
-        sex_combo.state(["readonly"])
-
-        ttk.Label(profile_frame, text="Activity").grid(row=0, column=3, sticky=tk.W)
-        self.activity_var = tk.StringVar(value=self.profile.get("activity_level") or "moderate")
-        activity_combo = ttk.Combobox(
-            profile_frame,
-            textvariable=self.activity_var,
-            values=["sedentary", "light", "moderate", "active", "very active"],
-            width=12,
-        )
-        activity_combo.grid(row=1, column=3, sticky=tk.W, padx=(12, 0), pady=(0, 8))
-        activity_combo.state(["readonly"])
-
-        ttk.Label(profile_frame, text="Baseline weight (kg)").grid(
-            row=0, column=4, sticky=tk.W
-        )
-        self.baseline_weight_var = tk.StringVar(value=self.profile.get("baseline_weight") or "")
-        ttk.Entry(profile_frame, textvariable=self.baseline_weight_var, width=12).grid(
-            row=1, column=4, sticky=tk.W, padx=(12, 0), pady=(0, 8)
-        )
-
-        ttk.Label(profile_frame, text="Baseline maintenance").grid(
-            row=0, column=5, sticky=tk.W
-        )
-        self.baseline_maintenance_var = tk.StringVar(
-            value=self.profile.get("baseline_maintenance") or MAINTENANCE_BASELINE_DEFAULT
-        )
-        ttk.Entry(profile_frame, textvariable=self.baseline_maintenance_var, width=12).grid(
-            row=1, column=5, sticky=tk.W, padx=(12, 0), pady=(0, 8)
-        )
-
-        save_profile_button = ttk.Button(
-            profile_frame, text="Save profile", command=self.save_profile
-        )
-        save_profile_button.grid(row=1, column=6, sticky=tk.W, padx=(12, 0), pady=(0, 8))
 
         self.tree = ttk.Treeview(
             table_frame,
@@ -496,18 +344,23 @@ class WeightTrackerApp(tk.Tk):
         self.bodyfat_tab = ttk.Frame(notebook)
         self.calories_tab = ttk.Frame(notebook)
         self.maintenance_tab = ttk.Frame(notebook)
+        self.maintenance_error_tab = ttk.Frame(notebook)
 
         notebook.add(self.weight_tab, text="Weight")
         notebook.add(self.waist_tab, text="Waist")
         notebook.add(self.bodyfat_tab, text="Body fat index")
         notebook.add(self.calories_tab, text="Calories")
         notebook.add(self.maintenance_tab, text="Maintenance range")
+        notebook.add(self.maintenance_error_tab, text="Maintenance error")
 
         self.weight_fig, self.weight_ax = self.create_chart(self.weight_tab)
         self.waist_fig, self.waist_ax = self.create_chart(self.waist_tab)
         self.bodyfat_fig, self.bodyfat_ax = self.create_chart(self.bodyfat_tab)
         self.calories_fig, self.calories_ax = self.create_chart(self.calories_tab)
         self.maintenance_fig, self.maintenance_ax = self.create_chart(self.maintenance_tab)
+        self.maintenance_error_fig, self.maintenance_error_ax = self.create_chart(
+            self.maintenance_error_tab
+        )
 
     def create_chart(self, parent):
         fig = Figure(figsize=(6, 4), dpi=100)
@@ -595,15 +448,15 @@ class WeightTrackerApp(tk.Tk):
         )
 
         maintenance_dates = weight_dates if weight_dates else calories_dates
-        low, high, mid = calculate_maintenance_range(
+        low, high, mid, error = calculate_maintenance_range(
             maintenance_dates,
             calories_values,
             accuracy_values,
             weight_values,
             waist_values,
-            self.profile,
         )
         self.plot_maintenance_range(maintenance_dates, low, high, mid)
+        self.plot_maintenance_error(maintenance_dates, error)
 
     def plot_metric(self, ax, fig, dates, values, label, color):
         ax.clear()
@@ -643,6 +496,24 @@ class WeightTrackerApp(tk.Tk):
         self.maintenance_ax.legend()
         self.maintenance_fig.autofmt_xdate()
         self.maintenance_fig.canvas.draw()
+
+    def plot_maintenance_error(self, dates, error_values):
+        self.maintenance_error_ax.clear()
+        self.maintenance_error_ax.grid(True, linestyle="--", alpha=0.3)
+        if not dates:
+            self.maintenance_error_ax.set_title("No data yet")
+            self.maintenance_error_fig.canvas.draw()
+            return
+
+        x_vals = [dt.datetime.combine(d, dt.time()) for d in dates]
+        self.maintenance_error_ax.plot(
+            x_vals, error_values, color="#dc2626", linewidth=2, label="Prediction error"
+        )
+        self.maintenance_error_ax.axhline(0, color="#111827", linewidth=1)
+        self.maintenance_error_ax.set_title("Maintenance prediction error (kcal)")
+        self.maintenance_error_ax.legend()
+        self.maintenance_error_fig.autofmt_xdate()
+        self.maintenance_error_fig.canvas.draw()
 
     def on_select_row(self, _event):
         selection = self.tree.selection()
@@ -725,43 +596,6 @@ class WeightTrackerApp(tk.Tk):
         self.refresh_charts()
         self.clear_form()
 
-    def save_profile(self):
-        height, height_ok = self.parse_float(self.height_var.get().strip(), "height")
-        age, age_ok = self.parse_int(self.age_var.get().strip(), "age")
-        baseline_weight, weight_ok = self.parse_float(
-            self.baseline_weight_var.get().strip(), "baseline weight"
-        )
-        baseline_maintenance, maintenance_ok = self.parse_float(
-            self.baseline_maintenance_var.get().strip(), "baseline maintenance"
-        )
-
-        if not (height_ok and age_ok and weight_ok and maintenance_ok):
-            return
-
-        if height is not None and height <= 0:
-            messagebox.showerror("Invalid value", "Height must be positive.")
-            return
-        if age is not None and age <= 0:
-            messagebox.showerror("Invalid value", "Age must be positive.")
-            return
-        if baseline_weight is not None and baseline_weight <= 0:
-            messagebox.showerror("Invalid value", "Baseline weight must be positive.")
-            return
-        if baseline_maintenance is not None and baseline_maintenance <= 0:
-            messagebox.showerror("Invalid value", "Baseline maintenance must be positive.")
-            return
-
-        self.profile = {
-            "height_cm": height,
-            "age_years": age,
-            "sex": self.sex_var.get(),
-            "activity_level": self.activity_var.get(),
-            "baseline_weight": baseline_weight,
-            "baseline_maintenance": baseline_maintenance or MAINTENANCE_BASELINE_DEFAULT,
-        }
-        save_profile(self.conn, self.profile)
-        self.refresh_charts()
-
     def parse_float(self, value, label):
         if not value:
             return None, True
@@ -769,15 +603,6 @@ class WeightTrackerApp(tk.Tk):
             return float(value), True
         except ValueError:
             messagebox.showerror("Invalid value", f"Enter a valid number for {label}.")
-            return None, False
-
-    def parse_int(self, value, label):
-        if not value:
-            return None, True
-        try:
-            return int(value), True
-        except ValueError:
-            messagebox.showerror("Invalid value", f"Enter a valid integer for {label}.")
             return None, False
 
 
