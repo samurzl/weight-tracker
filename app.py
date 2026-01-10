@@ -259,7 +259,7 @@ def calculate_maintenance_range(
     sex,
 ):
     if not dates:
-        return [], [], [], []
+        return [], [], [], [], []
 
     weight_interp = interpolate_series(weight_values)
     waist_interp = interpolate_series(waist_values)
@@ -271,6 +271,7 @@ def calculate_maintenance_range(
     maintenance_high = []
     maintenance_mid = []
     maintenance_error = []
+    fat_kcal_series = []
 
     total_days = len(dates)
     baseline = float(np.nanmean(calories_interp)) if calories_interp else 2000.0
@@ -363,7 +364,13 @@ def calculate_maintenance_range(
             if implied_kcal > 0 and math.isfinite(implied_kcal):
                 fat_kcal_per_kg += (implied_kcal - fat_kcal_per_kg) * learning_rate
 
-    return maintenance_low, maintenance_high, maintenance_mid, maintenance_error
+    return (
+        maintenance_low,
+        maintenance_high,
+        maintenance_mid,
+        maintenance_error,
+        fat_kcal_series,
+    )
 
 
 class WeightTrackerApp(tk.Tk):
@@ -496,6 +503,7 @@ class WeightTrackerApp(tk.Tk):
         self.calories_tab = ttk.Frame(notebook)
         self.maintenance_tab = ttk.Frame(notebook)
         self.maintenance_error_tab = ttk.Frame(notebook)
+        self.fat_energy_tab = ttk.Frame(notebook)
 
         notebook.add(self.weight_tab, text="Weight")
         notebook.add(self.waist_tab, text="Waist")
@@ -503,6 +511,7 @@ class WeightTrackerApp(tk.Tk):
         notebook.add(self.calories_tab, text="Calories")
         notebook.add(self.maintenance_tab, text="Maintenance range")
         notebook.add(self.maintenance_error_tab, text="Maintenance error")
+        notebook.add(self.fat_energy_tab, text="Fat energy")
 
         self.weight_fig, self.weight_ax = self.create_chart(self.weight_tab)
         self.waist_fig, self.waist_ax = self.create_chart(self.waist_tab)
@@ -512,6 +521,7 @@ class WeightTrackerApp(tk.Tk):
         self.maintenance_error_fig, self.maintenance_error_ax = self.create_chart(
             self.maintenance_error_tab
         )
+        self.fat_energy_fig, self.fat_energy_ax = self.create_chart(self.fat_energy_tab)
 
     def create_chart(self, parent):
         fig = Figure(figsize=(6, 4), dpi=100)
@@ -590,7 +600,7 @@ class WeightTrackerApp(tk.Tk):
         )
 
         maintenance_dates = weight_dates if weight_dates else calories_dates
-        low, high, mid, error = calculate_maintenance_range(
+        low, high, mid, error, fat_kcal_series = calculate_maintenance_range(
             maintenance_dates,
             calories_values,
             accuracy_values,
@@ -600,6 +610,14 @@ class WeightTrackerApp(tk.Tk):
         )
         self.plot_maintenance_range(maintenance_dates, low, high, mid)
         self.plot_maintenance_error(maintenance_dates, error)
+        self.plot_metric(
+            self.fat_energy_ax,
+            self.fat_energy_fig,
+            maintenance_dates,
+            fat_kcal_series,
+            "Fat energy per kg (kcal)",
+            color="#0f766e",
+        )
 
     def plot_metric(self, ax, fig, dates, values, label, color, fill_strategy=interpolate_series):
         ax.clear()
